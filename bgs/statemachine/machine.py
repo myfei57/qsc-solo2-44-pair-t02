@@ -116,6 +116,23 @@ class SequenceMachine:
                 required=phase,
             )
 
+    def require_at(self, phase: str, *, action: str) -> None:
+        """Refuse ``action`` unless the line currently sits at ``phase``.
+
+        Use this for one-shot moves to the next stage, which must not fire
+        twice or after the line has already advanced past them.
+        """
+
+        self.require_at_least(phase, action=action)
+        if self.phase != phase:
+            raise OrderViolationError(
+                "action belongs to a stage the line has already left",
+                line=self._line,
+                action=action,
+                current=self.phase,
+                required=phase,
+            )
+
     def rewind_to(self, phase: str, *, tick: int, reason: str) -> PhaseStep:
         """Move the line back to an earlier stage, never forwards."""
 

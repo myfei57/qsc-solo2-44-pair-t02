@@ -47,13 +47,16 @@ class PreGate:
         facts: Mapping[str, bool],
         machine: SequenceMachine | None = None,
         required_phase: str | None = None,
+        exact_phase: bool = False,
     ) -> GateResult:
         """Check the stage requirement and then the interlock table."""
 
-        decision = self._engine.evaluate(action, facts)
         if machine is not None and required_phase is not None:
             try:
-                machine.require_at_least(required_phase, action=action)
+                if exact_phase:
+                    machine.require_at(required_phase, action=action)
+                else:
+                    machine.require_at_least(required_phase, action=action)
             except OrderViolationError as exc:
                 return GateResult(
                     action=action,
@@ -67,6 +70,7 @@ class PreGate:
                         message=exc.message,
                     ),
                 )
+        decision = self._engine.evaluate(action, facts)
         return GateResult(action=action, allowed=decision.allowed, phase=None if machine is None else machine.phase, decision=decision)
 
     def require(
@@ -76,10 +80,17 @@ class PreGate:
         facts: Mapping[str, bool],
         machine: SequenceMachine | None = None,
         required_phase: str | None = None,
+        exact_phase: bool = False,
     ) -> GateResult:
         """Raise unless the gate would allow ``action``."""
 
-        result = self.evaluate(action, facts=facts, machine=machine, required_phase=required_phase)
+        result = self.evaluate(
+            action,
+            facts=facts,
+            machine=machine,
+            required_phase=required_phase,
+            exact_phase=exact_phase,
+        )
         if result.allowed:
             return result
         if result.decision.blocking and result.decision.blocking[0].startswith("stage:"):

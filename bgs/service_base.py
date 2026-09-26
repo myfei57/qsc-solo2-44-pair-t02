@@ -77,7 +77,7 @@ class LineService:
         )
         return self.context.bus.publish(event)
 
-    def require(self, action: str, *, required_phase: str | None = None, **extra: bool) -> GateResult:
+    def require(self, action: str, *, required_phase: str | None = None, exact_phase: bool = False, **extra: bool) -> GateResult:
         """Run the pre gate for ``action``."""
 
         return self.context.gate.require(
@@ -85,6 +85,7 @@ class LineService:
             facts=self.facts(**extra),
             machine=self.machine if required_phase is not None else None,
             required_phase=required_phase,
+            exact_phase=exact_phase,
         )
 
     def advance(self, phase: str, reason: str) -> PhaseStep:

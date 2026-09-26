@@ -39,20 +39,27 @@ class BatchRegistry:
     def declare(self, batch_id: str, *, tick: int, generation: int, quantity: float, unit: str = "t") -> Batch:
         """Register a new batch, refusing identifiers that already exist."""
 
+        self.require_available(batch_id)
         if not batch_id:
             raise ValidationError("batch identifier must not be empty")
         if quantity <= 0:
             raise ValidationError("batch quantity must be positive", quantity=quantity)
-        if batch_id in self._batches:
-            existing = self._batches[batch_id]
+        batch = Batch(batch_id=batch_id, generation=generation, tick=tick, quantity=quantity, unit=unit)
+        self._batches[batch_id] = batch
+        return batch
+
+    def require_available(self, batch_id: str) -> None:
+        """Refuse an identifier that was already declared."""
+
+        if not batch_id:
+            raise ValidationError("batch identifier must not be empty")
+        existing = self._batches.get(batch_id)
+        if existing is not None:
             raise DuplicateError(
                 "batch identifier was already declared",
                 batch_id=batch_id,
                 first_declared_tick=existing.tick,
             )
-        batch = Batch(batch_id=batch_id, generation=generation, tick=tick, quantity=quantity, unit=unit)
-        self._batches[batch_id] = batch
-        return batch
 
     def adopt(self, batch: Batch) -> None:
         """Adopt a batch read back from the stream during replay."""

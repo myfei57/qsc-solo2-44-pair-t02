@@ -28,15 +28,28 @@ class FeedService(LineService):
     def declare_batch(self, batch_id: str, quantity: float) -> dict[str, Any]:
         """Declare the batch that will be fed, once the mix is durable."""
 
+        # A batch cannot be reported until the mix has been confirmed and made
+        # durable; the gate raises before anything is written to the stream.
+        self.require("feed.batch")
         plan = plan_cycle(batch_id, quantity, self.context.config.limits)
+        # Refuse a reused identifier before a generation is issued, so a
+        # rejected declaration leaves neither a batch nor a dangling token.
+        self.context.batches.require_available(plan.batch_id)
+        token = self.context.versions.bump(self.subject, tick=self.context.clock.now())
         batch = self.context.batches.declare(
             plan.batch_id,
             tick=self.context.clock.now(),
-            generation=0,
+            generation=token.value,
             quantity=plan.quantity,
             unit=plan.unit,
         )
-        self.publish(BATCH_KIND, {"active": True})
+        self.publish(
+            BATCH_KIND,
+            {
+                "active": True,
+                **batch.describe(),
+            },
+        )
         if self.machine.is_at(FeedPhase.IDLE.value):
             self.advance(FeedPhase.STIR_CONFIRMED.value, "batch declared against a durable mix")
         self.emit("feed.batch_declared", batch.describe())
@@ -45,7 +58,7 @@ class FeedService(LineService):
     def start(self) -> dict[str, Any]:
         """Open the feed gate."""
 
-        self.require("feed.start", required_phase=FeedPhase.STIR_CONFIRMED.value)
+        self.require("feed.start", required_phase=FeedPhase.STIR_CONFIRMED.value, exact_phase=True)
         batch = self.context.view.latest(BATCH_KIND)
         self.advance(FeedPhase.FEEDING.value, "feed gate opened")
         self.publish(
@@ -53,6 +66,7 @@ class FeedService(LineService):
             {
                 "active": True,
                 "batch_id": batch.payload.get("batch_id") if batch is not None else None,
+                "generation": batch.payload.get("generation") if batch is not None else None,
             },
         )
         self.emit("feed.opened")
@@ -61,10 +75,30 @@ class FeedService(LineService):
     def close(self) -> dict[str, Any]:
         """Close the feed gate and hand the batch to fermentation."""
 
-        self.require("feed.close")
+        # The gate must actually be open before a load can be taken; close is
+        # a one-shot move out of ``feeding``, so it fires exactly there --
+        # never before the gate opens and never a second time afterwards.
+        self.require("feed.close", required_phase=FeedPhase.FEEDING.value, exact_phase=True)
         batch = self.context.view.latest(BATCH_KIND)
+        batch_id = batch.payload.get("batch_id") if batch is not None else None
+        generation = batch.payload.get("generation") if batch is not None else None
         self.advance(FeedPhase.FERMENTING.value, "feed gate closed")
-        self.publish(OPEN_KIND, {"active": False})
+        self.publish(
+            OPEN_KIND,
+            {
+                "active": False,
+                "batch_id": batch_id,
+                "generation": generation,
+            },
+        )
+        self.publish(
+            FERMENT_KIND,
+            {
+                "active": True,
+                "batch_id": batch_id,
+                "generation": generation,
+            },
+        )
         self.emit("feed.closed")
         return self.status()
 
@@ -72,13 +106,14 @@ class FeedService(LineService):
         state = self.state()
         feed = state.get("feed", {})
         opened = feed.get("open") if isinstance(feed, dict) else None
+        latest = self.context.view.latest(BATCH_KIND)
         return {
             "phase": self.machine.phase,
             "phase_index": self.machine.index,
             "sequence": self.machine.order(),
             "next_phase": self.machine.next_phase(),
             "open": bool(opened.get("active", False)) if isinstance(opened, dict) else False,
-            "batch": (self.context.view.latest(BATCH_KIND).payload.get("batch_id") if self.context.view.latest(BATCH_KIND) else None),
+            "batch": latest.payload.get("batch_id") if latest else None,
             "batches": self.context.batches.count(),
         }
 
