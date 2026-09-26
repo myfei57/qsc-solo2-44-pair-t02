@@ -26,19 +26,47 @@ class FeedService(LineService):
         return base
 
     def declare_batch(self, batch_id: str, quantity: float) -> dict[str, Any]:
-        """Declare the batch that will be fed, once the mix is durable."""
+        """Declare the batch that will be fed, once the mix is durable.
+
+        A batch can only be declared while the line is idle and only after the
+        mixer state has been written durably.  Declaring it bumps the feed
+        generation, and that generation travels with the batch record so the
+        ledger stays reconcilable after a restart.
+        """
 
         plan = plan_cycle(batch_id, quantity, self.context.config.limits)
+        # The durable-mix gate runs first so a premature declaration reads as
+        # a missing prerequisite, not as a bad quantity or a stale line.
+        self.require("feed.batch")
+        # Identity is checked against the whole history before the stage
+        # guard and before any generation is issued, so reusing a batch id
+        # always reads as a duplicate and leaves no state behind.
+        self.context.batches.require_unique(plan.batch_id)
+        self.require_order(
+            self.machine.is_at(FeedPhase.IDLE.value),
+            "a batch can only be declared while the feed line is idle",
+            current=self.machine.phase,
+            required=FeedPhase.IDLE.value,
+        )
+        token = self.context.versions.bump("feed", tick=self.context.clock.now())
         batch = self.context.batches.declare(
             plan.batch_id,
             tick=self.context.clock.now(),
-            generation=0,
+            generation=token.value,
             quantity=plan.quantity,
             unit=plan.unit,
         )
-        self.publish(BATCH_KIND, {"active": True})
-        if self.machine.is_at(FeedPhase.IDLE.value):
-            self.advance(FeedPhase.STIR_CONFIRMED.value, "batch declared against a durable mix")
+        self.publish(
+            BATCH_KIND,
+            {
+                "active": True,
+                "batch_id": batch.batch_id,
+                "quantity": batch.quantity,
+                "unit": batch.unit,
+                "generation": batch.generation,
+            },
+        )
+        self.advance(FeedPhase.STIR_CONFIRMED.value, "batch declared against a durable mix")
         self.emit("feed.batch_declared", batch.describe())
         return {"batch": batch.describe(), "status": self.status()}
 
@@ -61,10 +89,12 @@ class FeedService(LineService):
     def close(self) -> dict[str, Any]:
         """Close the feed gate and hand the batch to fermentation."""
 
-        self.require("feed.close")
-        batch = self.context.view.latest(BATCH_KIND)
+        self.require("feed.close", required_phase=FeedPhase.FEEDING.value)
+        opened = self.context.view.latest(OPEN_KIND)
+        batch_id = opened.payload.get("batch_id") if opened is not None else None
         self.advance(FeedPhase.FERMENTING.value, "feed gate closed")
-        self.publish(OPEN_KIND, {"active": False})
+        self.publish(OPEN_KIND, {"active": False, "batch_id": batch_id})
+        self.publish(FERMENT_KIND, {"active": True, "batch_id": batch_id})
         self.emit("feed.closed")
         return self.status()
 

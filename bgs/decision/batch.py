@@ -64,6 +64,17 @@ class BatchRegistry:
     def has(self, batch_id: str) -> bool:
         return batch_id in self._batches
 
+    def require_unique(self, batch_id: str) -> None:
+        """Refuse an identifier that was declared earlier, without mutating."""
+
+        existing = self._batches.get(batch_id)
+        if existing is not None:
+            raise DuplicateError(
+                "batch identifier was already declared",
+                batch_id=batch_id,
+                first_declared_tick=existing.tick,
+            )
+
     def get(self, batch_id: str) -> Batch:
         batch = self._batches.get(batch_id)
         if batch is None:
